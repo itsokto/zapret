@@ -5,13 +5,15 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <sys/queue.h>
+#include <time.h>
+#include "tpws.h"
 #include "pools.h"
+#include "helpers.h"
+#include "protocol.h"
 
-#define HOSTLIST_AUTO_FAIL_THRESHOLD_DEFAULT	2
+#define HOSTLIST_AUTO_FAIL_THRESHOLD_DEFAULT	3
 #define	HOSTLIST_AUTO_FAIL_TIME_DEFAULT 	60
 
-enum splithttpreq { split_none = 0, split_method, split_host };
-enum tlsrec { tlsrec_none = 0, tlsrec_sni, tlsrec_pos };
 enum bindll { unwanted=0, no, prefer, force };
 
 #define MAX_BINDS	32
@@ -37,20 +39,26 @@ struct params_s
 	uid_t uid;
 	gid_t gid;
 	bool daemon;
-	int maxconn,maxfiles,max_orphan_time;
+	int maxconn,resolver_threads,maxfiles,max_orphan_time;
 	int local_rcvbuf,local_sndbuf,remote_rcvbuf,remote_sndbuf;
 
 	bool tamper; // any tamper option is set
 	bool hostcase, hostdot, hosttab, hostnospace, methodspace, methodeol, unixeol, domcase;
 	int hostpad;
 	char hostspell[4];
-	enum splithttpreq split_http_req;
-	enum tlsrec tlsrec;
+	enum httpreqpos split_http_req;
+	enum tlspos tlsrec;
 	int tlsrec_pos;
+	enum tlspos split_tls;
 	bool split_any_protocol;
 	int split_pos;
-	bool disorder;
+	bool disorder, disorder_http, disorder_tls;
+	bool oob, oob_http, oob_tls;
+	uint8_t oob_byte;
 	int ttl_default;
+
+	int mss;
+	port_filter mss_pf;
 
 	char pidfile[256];
 
@@ -58,12 +66,19 @@ struct params_s
 	struct str_list_head hostlist_files, hostlist_exclude_files;
 	char hostlist_auto_filename[PATH_MAX], hostlist_auto_debuglog[PATH_MAX];
 	int hostlist_auto_fail_threshold, hostlist_auto_fail_time;
+	time_t hostlist_auto_mod_time;
 	hostfail_pool *hostlist_auto_fail_counters;
+
+	bool tamper_start_n,tamper_cutoff_n;
+	unsigned int tamper_start,tamper_cutoff;
 
 	int debug;
 
 #if defined(BSD)
 	bool pf_enable;
+#endif
+#ifdef SPLICE_PRESENT
+	bool nosplice;
 #endif
 };
 

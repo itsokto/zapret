@@ -32,23 +32,8 @@ SYS_execveat,
 #ifdef SYS_exec_with_loader
 SYS_exec_with_loader,
 #endif
-#ifdef SYS_clone
-SYS_clone,
-#endif
-#ifdef SYS_clone2
-SYS_clone2,
-#endif
-#ifdef SYS_clone3
-SYS_clone3,
-#endif
 #ifdef SYS_osf_execve
 SYS_osf_execve,
-#endif
-#ifdef SYS_fork
-SYS_fork,
-#endif
-#ifdef SYS_vfork
-SYS_vfork,
 #endif
 #ifdef SYS_uselib
 SYS_uselib,
@@ -129,12 +114,6 @@ SYS_process_vm_writev,
 #endif
 #ifdef SYS_process_madvise
 SYS_process_madvise,
-#endif
-#ifdef SYS_tkill
-SYS_tkill,
-#endif
-#ifdef SYS_tgkill
-SYS_tgkill,
 #endif
 SYS_kill, SYS_ptrace
 };

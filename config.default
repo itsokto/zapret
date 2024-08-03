@@ -4,6 +4,9 @@
 # can help in case /tmp has not enough space
 #TMPDIR=/opt/zapret/tmp
 
+# redefine user for zapret daemons. required on Keenetic
+#WS_USER=nobody
+
 # override firewall type : iptables,nftables,ipfw
 #FWTYPE=iptables
 
@@ -63,22 +66,26 @@ MODE_FILTER=none
 
 # CHOOSE NFQWS DAEMON OPTIONS for DPI desync mode. run "nfq/nfqws --help" for option list
 DESYNC_MARK=0x40000000
+DESYNC_MARK_POSTNAT=0x20000000
 NFQWS_OPT_DESYNC="--dpi-desync=fake --dpi-desync-ttl=0 --dpi-desync-ttl6=0 --dpi-desync-fooling=badsum"
 #NFQWS_OPT_DESYNC_HTTP="--dpi-desync=split --dpi-desync-ttl=0 --dpi-desync-fooling=badsum"
 #NFQWS_OPT_DESYNC_HTTPS="--wssize=1:6 --dpi-desync=split --dpi-desync-ttl=0 --dpi-desync-fooling=badsum"
 #NFQWS_OPT_DESYNC_HTTP6="--dpi-desync=split --dpi-desync-ttl=5 --dpi-desync-fooling=none"
 #NFQWS_OPT_DESYNC_HTTPS6="--wssize=1:6 --dpi-desync=split --dpi-desync-ttl=5 --dpi-desync-fooling=none"
-NFQWS_OPT_DESYNC_QUIC="--dpi-desync=fake"
+NFQWS_OPT_DESYNC_QUIC="--dpi-desync=fake --dpi-desync-repeats=6"
 #NFQWS_OPT_DESYNC_QUIC6="--dpi-desync=hopbyhop"
 
 # CHOOSE TPWS DAEMON OPTIONS. run "tpws/tpws --help" for option list
-TPWS_OPT="--hostspell=HOST --split-http-req=method --split-pos=3"
+TPWS_OPT="--hostspell=HOST --split-http-req=method --split-pos=3 --oob"
 
 # openwrt only : donttouch,none,software,hardware
 FLOWOFFLOAD=donttouch
 
 # openwrt: specify networks to be treated as LAN. default is "lan"
 #OPENWRT_LAN="lan lan2 lan3"
+# openwrt: specify networks to be treated as WAN. default wans are interfaces with default route
+#OPENWRT_WAN4="wan vpn"
+#OPENWRT_WAN6="wan6 vpn6"
 
 # for routers based on desktop linux and macos. has no effect in openwrt.
 # CHOOSE LAN and optinally WAN/WAN6 NETWORK INTERFACES

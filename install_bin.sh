@@ -16,13 +16,15 @@ check_dir()
 	if [ -f "$exe" ]; then
 		if [ -x "$exe" ]; then
 			# ash and dash try to execute invalid executables as a script. they interpret binary garbage with possible negative consequences
-			# bash do not do this
+			# bash and zsh do not do this
 			if exists bash; then
-				out=$(echo 0.0.0.0 | bash -c "$exe" 2>/dev/null)
+				out=$(echo 0.0.0.0 | bash -c "\"$exe"\" 2>/dev/null)
+			elif exists zsh; then
+				out=$(echo 0.0.0.0 | zsh -c "\"$exe\"" 2>/dev/null)
 			else
-				# find do not use its own shell exec
+				# find does not use its own shell exec
 				# it uses execvp(). in musl libc it does not call shell, in glibc it DOES call /bin/sh
-				# that's why prefer bash if present
+				# that's why prefer bash or zsh if present. otherwise it's our last chance
 				out=$(echo 0.0.0.0 | find "$dir" -maxdepth 1 -name ip2net -exec {} \; 2>/dev/null)
 			fi
 			[ -n "$out" ]
@@ -47,15 +49,27 @@ ccp()
 }
 
 UNAME=$(uname)
-if [ "$UNAME" = "Linux" ]; then
- ARCHLIST="my x86_64 x86 aarch64 arm mips64r2-msb mips32r1-lsb mips32r1-msb ppc"
-elif [ "$UNAME" = "Darwin" ]; then
- ARCHLIST="my mac64"
-elif [ "$UNAME" = "FreeBSD" ]; then
- ARCHLIST="my freebsd-x64"
-else
- ARCHLIST="my"
-fi
+unset PKTWS
+case $UNAME in
+	Linux)
+		ARCHLIST="my x86_64 x86 aarch64 arm mips64r2-msb mips32r1-lsb mips32r1-msb ppc"
+		PKTWS=nfqws
+		;;
+	Darwin)
+		ARCHLIST="my mac64"
+		;;
+	FreeBSD)
+		ARCHLIST="my freebsd-x64"
+		PKTWS=dvtws
+		;;
+	CYGWIN*)
+		UNAME=CYGWIN
+		ARCHLIST="win64"
+		PKTWS=winws
+		;;
+	*)
+		ARCHLIST="my"
+esac
 
 if [ "$1" = "getarch" ]; then
 	for arch in $ARCHLIST
@@ -75,12 +89,8 @@ else
 			echo installing binaries ...
 			ccp $arch/ip2net ip2net
 			ccp $arch/mdig mdig
-			if [ "$UNAME" = "Linux" ]; then
-			 ccp $arch/nfqws nfq
-			else
-			 ccp $arch/dvtws nfq
-			fi
-			ccp $arch/tpws tpws
+			[ -n "$PKTWS" ] && ccp $arch/$PKTWS nfq
+			[ "$UNAME" = CYGWIN ] || ccp $arch/tpws tpws
 	 		exit 0
 		else
 			echo $arch is NOT OK

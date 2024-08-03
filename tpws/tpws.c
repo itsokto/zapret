@@ -54,8 +54,7 @@ void dohup(void)
 {
 	if (bHup)
 	{
-		if (!LoadHostLists(&params.hostlist, &params.hostlist_files) ||
-			!LoadHostLists(&params.hostlist_exclude, &params.hostlist_exclude_files))
+		if (!LoadIncludeHostLists() || !LoadExcludeHostLists())
 		{
 			// what will we do without hostlist ?? sure, gonna die
 			exit(1);
@@ -139,11 +138,15 @@ static void exithelp(void)
 		" * multiple binds are supported. each bind-addr, bind-iface* start new bind\n"
 		" --port=<port>\t\t\t\t; only one port number for all binds is supported\n"
 		" --socks\t\t\t\t; implement socks4/5 proxy instead of transparent proxy\n"
-		" --no-resolve\t\t\t\t; disable socks5 remote dns ability (resolves are not async, they block all activity)\n"
+		" --no-resolve\t\t\t\t; disable socks5 remote dns ability\n"
+		" --resolver-threads=<int>\t\t; number of resolver worker threads\n"
 		" --local-rcvbuf=<bytes>\n"
 		" --local-sndbuf=<bytes>\n"
 		" --remote-rcvbuf=<bytes>\n"
 		" --remote-sndbuf=<bytes>\n"
+#ifdef SPLICE_PRESENT
+		" --nosplice\t\t\t\t; do not use splice to transfer data between sockets\n"
+#endif
 		" --skip-nodelay\t\t\t\t; do not set TCP_NODELAY option for outgoing connections (incompatible with split options)\n"
 		" --maxconn=<max_connections>\n"
 #ifdef SPLICE_PRESENT
@@ -169,13 +172,16 @@ static void exithelp(void)
 		" --hostlist-auto-debug=<logfile>\t; debug auto hostlist positives\n"
 		"\nTAMPER:\n"
 		" --split-http-req=method|host\t\t; split at specified logical part of plain http request\n"
-		" --split-pos=<numeric_offset>\t\t; split at specified pos. split-http-req takes precedence for http.\n"
+		" --split-tls=sni|sniext\t\t\t; split at specified logical part of TLS ClientHello\n"
+		" --split-pos=<numeric_offset>\t\t; split at specified pos. split-http-req or split-tls take precedence for http.\n"
 		" --split-any-protocol\t\t\t; split not only http and https\n"
 #if defined(BSD) && !defined(__APPLE__)
-		" --disorder\t\t\t\t; when splitting simulate sending second fragment first (BSD sends entire message instead of first fragment, this is not good)\n"
+		" --disorder[=http|tls]\t\t\t; when splitting simulate sending second fragment first (BSD sends entire message instead of first fragment, this is not good)\n"
 #else
-		" --disorder\t\t\t\t; when splitting simulate sending second fragment first\n"
+		" --disorder[=http|tls]\t\t\t; when splitting simulate sending second fragment first\n"
 #endif
+		" --oob[=http|tls]\t\t\t; when splitting send out of band byte. default is HEX 0x00.\n"
+		" --oob-data=<char>|0xHEX\t\t; override default 0x00 OOB byte.\n"
 		" --hostcase\t\t\t\t; change Host: => host:\n"
 		" --hostspell\t\t\t\t; exact spelling of \"Host\" header. must be 4 chars. default is \"host\"\n"
 		" --hostdot\t\t\t\t; add \".\" after Host: name\n"
@@ -186,8 +192,14 @@ static void exithelp(void)
 		" --methodspace\t\t\t\t; add extra space after method\n"
 		" --methodeol\t\t\t\t; add end-of-line before method\n"
 		" --unixeol\t\t\t\t; replace 0D0A to 0A\n"
-		" --tlsrec=sni\t\t\t\t; make 2 TLS records. split at SNI. don't split if SNI is not present\n"
-		" --tlsrec-pos=<pos>\t\t\t; make 2 TLS records. split at specified pos\n",
+		" --tlsrec=sni|sniext\t\t\t; make 2 TLS records. split at specified logical part. don't split if SNI is not present\n"
+		" --tlsrec-pos=<pos>\t\t\t; make 2 TLS records. split at specified pos\n"
+#ifdef __linux__
+		" --mss=<int>\t\t\t\t; set client MSS. forces server to split messages but significantly decreases speed !\n"
+		" --mss-pf=[~]port1[-port2]\t\t; MSS port filter. ~ means negation\n"
+#endif
+		" --tamper-start=[n]<pos>\t\t; start tampering only from specified outbound stream position. default is 0. 'n' means data block number.\n"
+		" --tamper-cutoff=[n]<pos>\t\t; do not tamper anymore after specified outbound stream position. default is unlimited.\n",
 		HOSTLIST_AUTO_FAIL_THRESHOLD_DEFAULT, HOSTLIST_AUTO_FAIL_TIME_DEFAULT
 	);
 	exit(1);
@@ -242,6 +254,28 @@ void save_default_ttl(void)
 	}
 }
 
+bool parse_httpreqpos(const char *s, enum httpreqpos *pos)
+{
+	if (!strcmp(s, "method"))
+		*pos = httpreqpos_method;
+	else if (!strcmp(s, "host"))
+		*pos = httpreqpos_host;
+	else
+		return false;
+	return true;
+}
+bool parse_tlspos(const char *s, enum tlspos *pos)
+{
+	if (!strcmp(s, "sni"))
+		*pos = tlspos_sni;
+	else if (!strcmp(s, "sniext"))
+		*pos = tlspos_sniext;
+	else
+		return false;
+	return true;
+}
+
+
 void parse_params(int argc, char *argv[])
 {
 	int option_index = 0;
@@ -291,32 +325,44 @@ void parse_params(int argc, char *argv[])
 		{ "hostpad",required_argument,0,0 },// optidx=21
 		{ "domcase",no_argument,0,0 },// optidx=22
 		{ "split-http-req",required_argument,0,0 },// optidx=23
-		{ "split-pos",required_argument,0,0 },// optidx=24
-		{ "split-any-protocol",optional_argument,0,0},// optidx=25
-		{ "disorder",no_argument,0,0 },// optidx=26
-		{ "methodspace",no_argument,0,0 },// optidx=27
-		{ "methodeol",no_argument,0,0 },// optidx=28
-		{ "hosttab",no_argument,0,0 },// optidx=29
-		{ "unixeol",no_argument,0,0 },// optidx=30
-		{ "tlsrec",required_argument,0,0 },// optidx=31
-		{ "tlsrec-pos",required_argument,0,0 },// optidx=32
-		{ "hostlist",required_argument,0,0 },// optidx=33
-		{ "hostlist-exclude",required_argument,0,0 },// optidx=34
-		{ "hostlist-auto",required_argument,0,0}, // optidx=35
-		{ "hostlist-auto-fail-threshold",required_argument,0,0}, // optidx=36
-		{ "hostlist-auto-fail-time",required_argument,0,0},	// optidx=37
-		{ "hostlist-auto-debug",required_argument,0,0}, // optidx=38
-		{ "pidfile",required_argument,0,0 },// optidx=39
-		{ "debug",optional_argument,0,0 },// optidx=40
-		{ "local-rcvbuf",required_argument,0,0 },// optidx=41
-		{ "local-sndbuf",required_argument,0,0 },// optidx=42
-		{ "remote-rcvbuf",required_argument,0,0 },// optidx=43
-		{ "remote-sndbuf",required_argument,0,0 },// optidx=44
-		{ "socks",no_argument,0,0 },// optidx=45
-		{ "no-resolve",no_argument,0,0 },// optidx=46
-		{ "skip-nodelay",no_argument,0,0 },// optidx=47
+		{ "split-tls",required_argument,0,0 },// optidx=24
+		{ "split-pos",required_argument,0,0 },// optidx=25
+		{ "split-any-protocol",optional_argument,0,0},// optidx=26
+		{ "disorder",optional_argument,0,0 },// optidx=27
+		{ "oob",optional_argument,0,0 },// optidx=28
+		{ "oob-data",required_argument,0,0 },// optidx=29
+		{ "methodspace",no_argument,0,0 },// optidx=30
+		{ "methodeol",no_argument,0,0 },// optidx=31
+		{ "hosttab",no_argument,0,0 },// optidx=32
+		{ "unixeol",no_argument,0,0 },// optidx=33
+		{ "tlsrec",required_argument,0,0 },// optidx=34
+		{ "tlsrec-pos",required_argument,0,0 },// optidx=35
+		{ "hostlist",required_argument,0,0 },// optidx=36
+		{ "hostlist-exclude",required_argument,0,0 },// optidx=37
+		{ "hostlist-auto",required_argument,0,0}, // optidx=38
+		{ "hostlist-auto-fail-threshold",required_argument,0,0}, // optidx=39
+		{ "hostlist-auto-fail-time",required_argument,0,0},	// optidx=40
+		{ "hostlist-auto-debug",required_argument,0,0}, // optidx=41
+		{ "pidfile",required_argument,0,0 },// optidx=42
+		{ "debug",optional_argument,0,0 },// optidx=43
+		{ "local-rcvbuf",required_argument,0,0 },// optidx=44
+		{ "local-sndbuf",required_argument,0,0 },// optidx=45
+		{ "remote-rcvbuf",required_argument,0,0 },// optidx=46
+		{ "remote-sndbuf",required_argument,0,0 },// optidx=47
+		{ "socks",no_argument,0,0 },// optidx=48
+		{ "no-resolve",no_argument,0,0 },// optidx=49
+		{ "resolver-threads",required_argument,0,0 },// optidx=50
+		{ "skip-nodelay",no_argument,0,0 },// optidx=51
+		{ "tamper-start",required_argument,0,0 },// optidx=52
+		{ "tamper-cutoff",required_argument,0,0 },// optidx=53
 #if defined(BSD) && !defined(__OpenBSD__) && !defined(__APPLE__)
-		{ "enable-pf",no_argument,0,0 },// optidx=48
+		{ "enable-pf",no_argument,0,0 },// optidx=54
+#elif defined(__linux__)
+		{ "mss",required_argument,0,0 },// optidx=54
+		{ "mss-pf",required_argument,0,0 },// optidx=55
+#ifdef SPLICE_PRESENT
+		{ "nosplice",no_argument,0,0 },// optidx=55
+#endif
 #endif
 		{ "hostlist-auto-retrans-threshold",optional_argument,0,0}, // ignored. for nfqws command line compatibility
 		{ NULL,0,NULL,0 }
@@ -476,18 +522,22 @@ void parse_params(int argc, char *argv[])
 			params.tamper = true;
 			break;
 		case 23: /* split-http-req */
-			if (!strcmp(optarg, "method"))
-				params.split_http_req = split_method;
-			else if (!strcmp(optarg, "host"))
-				params.split_http_req = split_host;
-			else
+			if (!parse_httpreqpos(optarg, &params.split_http_req))
 			{
 				fprintf(stderr, "Invalid argument for split-http-req\n");
 				exit_clean(1);
 			}
 			params.tamper = true;
 			break;
-		case 24: /* split-pos */
+		case 24: /* split-tls */
+			if (!parse_tlspos(optarg, &params.split_tls))
+			{
+				fprintf(stderr, "Invalid argument for split-tls\n");
+				exit_clean(1);
+			}
+			params.tamper = true;
+			break;
+		case 25: /* split-pos */
 			i = atoi(optarg);
 			if (i>0)
 				params.split_pos = i;
@@ -498,42 +548,78 @@ void parse_params(int argc, char *argv[])
 			}
 			params.tamper = true;
 			break;
-		case 25: /* split-any-protocol */
+		case 26: /* split-any-protocol */
 			params.split_any_protocol = true;
 			break;
-		case 26: /* disorder */
-			params.disorder = true;
+		case 27: /* disorder */
+			if (optarg)
+			{
+				if (!strcmp(optarg,"http")) params.disorder_http=true;
+				else if (!strcmp(optarg,"tls")) params.disorder_tls=true;
+				else
+				{
+					fprintf(stderr, "Invalid argument for disorder\n");
+					exit_clean(1);
+				}
+			}
+			else
+				params.disorder = true;
 			save_default_ttl();
 			break;
-		case 27: /* methodspace */
+		case 28: /* oob */
+			if (optarg)
+			{
+				if (!strcmp(optarg,"http")) params.oob_http=true;
+				else if (!strcmp(optarg,"tls")) params.oob_tls=true;
+				else
+				{
+					fprintf(stderr, "Invalid argument for oob\n");
+					exit_clean(1);
+				}
+			}
+			else
+				params.oob = true;
+			break;
+		case 29: /* oob-data */
+			{
+				size_t l = strlen(optarg);
+				unsigned int bt;
+				if (l==1) params.oob_byte = (uint8_t)*optarg;
+				else if (l!=4 || sscanf(optarg,"0x%02X",&bt)!=1)
+				{
+					fprintf(stderr, "Invalid argument for oob-data\n");
+					exit_clean(1);
+				}
+				else params.oob_byte = (uint8_t)bt;
+			}
+			break;
+		case 30: /* methodspace */
 			params.methodspace = true;
 			params.tamper = true;
 			break;
-		case 28: /* methodeol */
+		case 31: /* methodeol */
 			params.methodeol = true;
 			params.tamper = true;
 			break;
-		case 29: /* hosttab */
+		case 32: /* hosttab */
 			params.hosttab = true;
 			params.tamper = true;
 			break;
-		case 30: /* unixeol */
+		case 33: /* unixeol */
 			params.unixeol = true;
 			params.tamper = true;
 			break;
-		case 31: /* tlsrec */
-			if (!strcmp(optarg, "sni"))
-				params.tlsrec = tlsrec_sni;
-			else
+		case 34: /* tlsrec */
+			if (!parse_tlspos(optarg, &params.tlsrec))
 			{
 				fprintf(stderr, "Invalid argument for tlsrec\n");
 				exit_clean(1);
 			}
 			params.tamper = true;
 			break;
-		case 32: /* tlsrec-pos */
+		case 35: /* tlsrec-pos */
 			if ((params.tlsrec_pos = atoi(optarg))>0)
-				params.tlsrec = tlsrec_pos;
+				params.tlsrec = tlspos_pos;
 			else
 			{
 				fprintf(stderr, "Invalid argument for tlsrec-pos\n");
@@ -541,7 +627,7 @@ void parse_params(int argc, char *argv[])
 			}
 			params.tamper = true;
 			break;
-		case 33: /* hostlist */
+		case 36: /* hostlist */
 			if (!strlist_add(&params.hostlist_files, optarg))
 			{
 				fprintf(stderr, "strlist_add failed\n");
@@ -549,7 +635,7 @@ void parse_params(int argc, char *argv[])
 			}
 			params.tamper = true;
 			break;
-		case 34: /* hostlist-exclude */
+		case 37: /* hostlist-exclude */
 			if (!strlist_add(&params.hostlist_exclude_files, optarg))
 			{
 				fprintf(stderr, "strlist_add failed\n");
@@ -557,7 +643,7 @@ void parse_params(int argc, char *argv[])
 			}
 			params.tamper = true;
 			break;
-		case 35: /* hostlist-auto */
+		case 38: /* hostlist-auto */
 			if (*params.hostlist_auto_filename)
 			{
 				fprintf(stderr, "only one auto hostlist is supported\n");
@@ -589,7 +675,7 @@ void parse_params(int argc, char *argv[])
 			params.hostlist_auto_filename[sizeof(params.hostlist_auto_filename) - 1] = '\0';
 			params.tamper = true; // need to detect blocks and update autohostlist. cannot just slice.
 			break;
-		case 36: /* hostlist-auto-fail-threshold */
+		case 39: /* hostlist-auto-fail-threshold */
 			params.hostlist_auto_fail_threshold = (uint8_t)atoi(optarg);
 			if (params.hostlist_auto_fail_threshold<1 || params.hostlist_auto_fail_threshold>20)
 			{
@@ -597,7 +683,7 @@ void parse_params(int argc, char *argv[])
 				exit_clean(1);
 			}
 			break;
-		case 37: /* hostlist-auto-fail-time */
+		case 40: /* hostlist-auto-fail-time */
 			params.hostlist_auto_fail_time = (uint8_t)atoi(optarg);
 			if (params.hostlist_auto_fail_time<1)
 			{
@@ -605,7 +691,7 @@ void parse_params(int argc, char *argv[])
 				exit_clean(1);
 			}
 			break;
-		case 38: /* hostlist-auto-debug */
+		case 41: /* hostlist-auto-debug */
 			{
 				FILE *F = fopen(optarg,"a+t");
 				if (!F)
@@ -620,38 +706,110 @@ void parse_params(int argc, char *argv[])
 				params.hostlist_auto_debuglog[sizeof(params.hostlist_auto_debuglog) - 1] = '\0';
 			}
 			break;
-		case 39: /* pidfile */
+		case 42: /* pidfile */
 			strncpy(params.pidfile,optarg,sizeof(params.pidfile));
 			params.pidfile[sizeof(params.pidfile)-1]='\0';
 			break;
-		case 40:
+		case 43:
 			params.debug = optarg ? atoi(optarg) : 1;
 			break;
-		case 41: /* local-rcvbuf */
+		case 44: /* local-rcvbuf */
+#ifdef __linux__
 			params.local_rcvbuf = atoi(optarg)/2;
+#else
+			params.local_rcvbuf = atoi(optarg);
+#endif
 			break;
-		case 42: /* local-sndbuf */
+		case 45: /* local-sndbuf */
+#ifdef __linux__
 			params.local_sndbuf = atoi(optarg)/2;
+#else
+			params.local_sndbuf = atoi(optarg);
+#endif
 			break;
-		case 43: /* remote-rcvbuf */
+		case 46: /* remote-rcvbuf */
+#ifdef __linux__
 			params.remote_rcvbuf = atoi(optarg)/2;
+#else
+			params.remote_rcvbuf = atoi(optarg);
+#endif
 			break;
-		case 44: /* remote-sndbuf */
+		case 47: /* remote-sndbuf */
+#ifdef __linux__
 			params.remote_sndbuf = atoi(optarg)/2;
+#else
+			params.remote_sndbuf = atoi(optarg);
+#endif
 			break;
-		case 45: /* socks */
+		case 48: /* socks */
 			params.proxy_type = CONN_TYPE_SOCKS;
 			break;
-		case 46: /* no-resolve */
+		case 49: /* no-resolve */
 			params.no_resolve = true;
 			break;
-		case 47: /* skip-nodelay */
+		case 50: /* resolver-threads */
+			params.resolver_threads = atoi(optarg);
+			if (params.resolver_threads<1 || params.resolver_threads>300)
+			{
+				fprintf(stderr, "resolver-threads must be within 1..300\n");
+				exit_clean(1);
+			}
+			break;
+		case 51: /* skip-nodelay */
 			params.skip_nodelay = true;
 			break;
+		case 52: /* tamper-start */
+			{
+				const char *p=optarg;
+				if (*p=='n')
+				{
+					params.tamper_start_n=true;
+					p++;
+				}
+				else
+					params.tamper_start_n=false;
+				params.tamper_start = atoi(p);
+			}
+			break;
+		case 53: /* tamper-cutoff */
+			{
+				const char *p=optarg;
+				if (*p=='n')
+				{
+					params.tamper_cutoff_n=true;
+					p++;
+				}
+				else
+					params.tamper_cutoff_n=false;
+				params.tamper_cutoff = atoi(p);
+			}
+			break;
 #if defined(BSD) && !defined(__OpenBSD__) && !defined(__APPLE__)
-		case 48: /* enable-pf */
+		case 54: /* enable-pf */
 			params.pf_enable = true;
 			break;
+#elif defined(__linux__)
+		case 54: /* mss */
+			// this option does not work in any BSD and MacOS. OS may accept but it changes nothing
+			params.mss = atoi(optarg);
+			if (params.mss<88 || params.mss>32767)
+			{
+				fprintf(stderr, "Invalid value for MSS. Linux accepts MSS 88-32767.\n");
+				exit_clean(1);
+			}
+			break;
+		case 55: /* mss-pf */
+			if (!pf_parse(optarg,&params.mss_pf))
+			{
+				fprintf(stderr, "Invalid MSS port filter.\n");
+				exit_clean(1);
+			}
+			break;
+#ifdef SPLICE_PRESENT
+		case 56: /* nosplice */
+			params.nosplice = true;
+			break;
+#endif
 #endif
 		}
 	}
@@ -669,14 +827,18 @@ void parse_params(int argc, char *argv[])
 		fprintf(stderr, "Cannot split with --skip-nodelay\n");
 		exit_clean(1);
 	}
+	if (!params.resolver_threads) params.resolver_threads = 5 + params.maxconn/50;
+	if (params.split_tls==tlspos_none && params.split_pos) params.split_tls=tlspos_pos;
+	if (params.split_http_req==httpreqpos_none && params.split_pos) params.split_http_req=httpreqpos_pos;
 
-	if (!LoadHostLists(&params.hostlist, &params.hostlist_files))
+	if (*params.hostlist_auto_filename) params.hostlist_auto_mod_time = file_mod_time(params.hostlist_auto_filename);
+	if (!LoadIncludeHostLists())
 	{
 		fprintf(stderr, "Include hostlist load failed\n");
 		exit_clean(1);
 	}
 	if (*params.hostlist_auto_filename) NonEmptyHostlist(&params.hostlist);
-	if (!LoadHostLists(&params.hostlist_exclude, &params.hostlist_exclude_files))
+	if (!LoadExcludeHostLists())
 	{
 		fprintf(stderr, "Exclude hostlist load failed\n");
 		exit_clean(1);
@@ -789,11 +951,11 @@ static bool set_ulimit(void)
 
 	if (!params.maxfiles)
 	{
-		// 4 fds per tamper connection (2 pipe + 2 socket), 6 fds for tcp proxy connection (4 pipe + 2 socket)
+		// 4 fds per tamper connection (2 pipe + 2 socket), 6 fds for tcp proxy connection (4 pipe + 2 socket), 2 fds (2 socket) for nosplice
 		// additional 1/2 for unpaired remote legs sending buffers
 		// 16 for listen_fd, epoll, hostlist, ...
 #ifdef SPLICE_PRESENT
-		fdmax = (params.tamper ? 4 : 6) * params.maxconn;
+		fdmax = (params.nosplice ? 2 : (params.tamper && !params.tamper_start && !params.tamper_cutoff ? 4 : 6)) * params.maxconn;
 #else
 		fdmax = 2 * params.maxconn;
 #endif

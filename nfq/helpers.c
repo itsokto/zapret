@@ -5,7 +5,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
-#include <time.h>
+#include <sys/stat.h>
+
+
+#include "params.h"
 
 void hexdump_limited_dlog(const uint8_t *data, size_t size, size_t limit)
 {
@@ -133,6 +136,51 @@ void print_sockaddr(const struct sockaddr *sa)
 	printf("%s", ip_port);
 }
 
+bool pton4_port(const char *s, struct sockaddr_in *sa)
+{
+	char ip[16],*p;
+	size_t l;
+	unsigned int u;
+
+	p = strchr(s,':');
+	if (!p) return false;
+	l = p-s;
+	if (l<7 || l>15) return false;
+	memcpy(ip,s,l);
+	ip[l]=0;
+	p++;
+
+	sa->sin_family = AF_INET;
+	if (inet_pton(AF_INET,ip,&sa->sin_addr)!=1 || sscanf(p,"%u",&u)!=1 || !u || u>0xFFFF) return false;
+	sa->sin_port = htons((uint16_t)u);
+	
+	return true;
+}
+bool pton6_port(const char *s, struct sockaddr_in6 *sa)
+{
+	char ip[40],*p;
+	size_t l;
+	unsigned int u;
+
+	if (*s++!='[') return false;
+	p = strchr(s,']');
+	if (!p || p[1]!=':') return false;
+	l = p-s;
+	if (l<2 || l>39) return false;
+	p+=2;
+	memcpy(ip,s,l);
+	ip[l]=0;
+
+	sa->sin6_family = AF_INET6;
+	if (inet_pton(AF_INET6,ip,&sa->sin6_addr)!=1 || sscanf(p,"%u",&u)!=1 || !u || u>0xFFFF) return false;
+	sa->sin6_port = htons((uint16_t)u);
+	sa->sin6_flowinfo = 0;
+	sa->sin6_scope_id = 0;
+	
+	return true;
+}
+
+
 void dbgprint_socket_buffers(int fd)
 {
 	if (params.debug)
@@ -255,4 +303,42 @@ int fprint_localtime(FILE *F)
 	time(&now);
 	localtime_r(&now,&t);
 	return fprintf(F, "%02d.%02d.%04d %02d:%02d:%02d", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, t.tm_hour, t.tm_min, t.tm_sec);
+}
+
+time_t file_mod_time(const char *filename)
+{
+	struct stat st;
+	return stat(filename,&st)==-1 ? 0 : st.st_mtime;
+}
+
+bool pf_in_range(uint16_t port, const port_filter *pf)
+{
+	return port && ((!pf->from && !pf->to || port>=pf->from && port<=pf->to) ^ pf->neg);
+}
+bool pf_parse(const char *s, port_filter *pf)
+{
+	unsigned int v1,v2;
+
+	if (!s) return false;
+	if (*s=='~') 
+	{
+		pf->neg=true;
+		s++;
+	}
+	else
+		pf->neg=false;
+	if (sscanf(s,"%u-%u",&v1,&v2)==2)
+	{
+		if (!v1 || v1>65535 || v2>65535 || v1>v2) return false;
+		pf->from=(uint16_t)v1;
+		pf->to=(uint16_t)v2;
+	}
+	else if (sscanf(s,"%u",&v1)==1)
+	{
+		if (!v1 || v1>65535) return false;
+		pf->to=pf->from=(uint16_t)v1;
+	}
+	else
+		return false;
+	return true;
 }

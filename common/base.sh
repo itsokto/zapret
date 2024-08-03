@@ -49,6 +49,17 @@ contains()
 	# check if substring $2 contains in $1
 	[ "${1#*$2}" != "$1" ]
 }
+starts_with()
+{
+	# $1 : what
+	# $2 : starts with
+	case "$1" in
+		"$2"*)
+			return 0
+			;;
+	esac
+	return 1
+}
 find_str_in_list()
 {
 	[ -n "$1" ] && {
@@ -60,7 +71,7 @@ find_str_in_list()
 }
 end_with_newline()
 {
-	local c=$(tail -c 1)
+	local c="$(tail -c 1)"
 	[ "$c" = "" ]
 }
 
@@ -140,12 +151,14 @@ linux_min_version()
 }
 linux_get_subsys()
 {
-	local INIT=$(sed 's/\x0/\n/g' /proc/1/cmdline | head -n 1)
+	local INIT="$(sed 's/\x0/\n/g' /proc/1/cmdline | head -n 1)"
 
 	[ -L "$INIT" ] && INIT=$(readlink "$INIT")
 	INIT=$(basename "$INIT")
 	if [ -f "/etc/openwrt_release" ] && [ "$INIT" = "procd" ] ; then
 		SUBSYS=openwrt
+	elif [ -x "/bin/ndm" ] ; then
+		SUBSYS=keenetic
 	else
 		# generic linux
 		SUBSYS=
@@ -211,7 +224,7 @@ fsleep_setup()
 	elif busybox usleep 1 2>/dev/null; then
 		FSLEEP=2
 	else
-		local errtext=$(read -t 0.001 2>&1)
+		local errtext="$(read -t 0.001 2>&1)"
 		if [ -z "$errtext" ]; then
 			FSLEEP=3
 		# newer openwrt has ucode with system function that supports timeout in ms
@@ -260,6 +273,44 @@ replace_char()
 	local b=$2
 	shift; shift
 	echo "$@" | tr $a $b
+}
+
+setup_md5()
+{
+	[ -n "$MD5" ] && return
+	MD5=md5sum
+	exists $MD5 || MD5=md5
+}
+
+random()
+{
+	# $1 - min, $2 - max
+	local r rs
+	setup_md5
+	if [ -c /dev/urandom ]; then
+		read rs </dev/urandom
+	else
+		rs="$RANDOM$RANDOM$(date)"
+	fi
+	# shells use signed int64
+	r=1$(echo $rs | $MD5 | sed 's/[^0-9]//g' | cut -c 1-17)
+	echo $(( ($r % ($2-$1+1)) + $1 ))
+}
+
+shell_name()
+{
+	[ -n "$SHELL_NAME" ] || {
+		[ -n "$UNAME" ] || UNAME="$(uname)"
+
+		if [ "$UNAME" = "Linux" ]; then
+			SHELL_NAME="$(readlink /proc/$$/exe)"
+			SHELL_NAME="$(basename "$SHELL_NAME")"
+		else
+			SHELL_NAME=$(ps -p $$ -o comm=)
+		fi
+
+		[ -n "$SHELL_NAME" ] || SHELL_NAME="$(basename "$SHELL")"
+	}
 }
 
 std_ports()

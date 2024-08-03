@@ -8,7 +8,7 @@
 #include <string.h>
 
 const char *http_methods[] = { "GET /","POST /","HEAD /","OPTIONS /","PUT /","DELETE /","CONNECT /","TRACE /",NULL };
-bool IsHttp(const uint8_t *data, size_t len)
+const char *HttpMethod(const uint8_t *data, size_t len)
 {
 	const char **method;
 	size_t method_len;
@@ -16,10 +16,34 @@ bool IsHttp(const uint8_t *data, size_t len)
 	{
 		method_len = strlen(*method);
 		if (method_len <= len && !memcmp(data, *method, method_len))
-			return true;
+			return *method;
 	}
-	return false;
+	return NULL;
 }
+bool IsHttp(const uint8_t *data, size_t len)
+{
+	return !!HttpMethod(data,len);
+}
+// pHost points to "Host: ..."
+bool HttpFindHost(uint8_t **pHost,uint8_t *buf,size_t bs)
+{
+	if (!*pHost)
+	{
+		*pHost = memmem(buf, bs, "\nHost:", 6);
+		if (*pHost) (*pHost)++;
+	}
+	return !!*pHost;
+}
+bool HttpFindHostConst(const uint8_t **pHost,const uint8_t *buf,size_t bs)
+{
+	if (!*pHost)
+	{
+		*pHost = memmem(buf, bs, "\nHost:", 6);
+		if (*pHost) (*pHost)++;
+	}
+	return !!*pHost;
+}
+
 bool IsHttpReply(const uint8_t *data, size_t len)
 {
 	// HTTP/1.x 200\r\n
@@ -106,6 +130,37 @@ bool HttpReplyLooksLikeDPIRedirect(const uint8_t *data, size_t len, const char *
 	
 	return strcasecmp(dhost, drhost)!=0;
 }
+size_t HttpPos(enum httpreqpos tpos_type, size_t hpos_pos, const uint8_t *http, size_t sz)
+{
+	const uint8_t *method, *host;
+	int i;
+	
+	switch(tpos_type)
+	{
+		case httpreqpos_method:
+			// recognize some tpws pre-applied hacks
+			method=http;
+			if (sz<10) break;
+			if (*method=='\n' || *method=='\r') method++;
+			if (*method=='\n' || *method=='\r') method++;
+			for (i=0;i<7;i++) if (*method>='A' && *method<='Z') method++;
+			if (i<3 || *method!=' ') break;
+			return method-http-1;
+		case httpreqpos_host:
+			if (HttpFindHostConst(&host,http,sz) && (host-http+7)<sz)
+			{
+				host+=5;
+				if (*host==' ') host++;
+				return host-http;
+			}
+			break;
+		case httpreqpos_pos:
+			break;
+		default:
+			return 0;
+	}
+	return hpos_pos<sz ? hpos_pos : 0;
+}
 
 
 uint16_t TLSRecordDataLen(const uint8_t *data)
@@ -125,6 +180,20 @@ bool IsTLSClientHello(const uint8_t *data, size_t len, bool bPartialIsOK)
 	return len >= 6 && data[0] == 0x16 && data[1] == 0x03 && data[2] >= 0x01 && data[2] <= 0x03 && data[5] == 0x01 && (bPartialIsOK || TLSRecordLen(data) <= len);
 }
 
+size_t TLSHandshakeLen(const uint8_t *data)
+{
+	return data[1] << 16 | data[2] << 8 | data[3]; // HandshakeProtocol length
+}
+bool IsTLSHandshakeClientHello(const uint8_t *data, size_t len)
+{
+	return len>=4 && data[0]==0x01 && TLSHandshakeLen(data)>0;
+}
+bool IsTLSHandshakeFull(const uint8_t *data, size_t len)
+{
+	return (4+TLSHandshakeLen(data))<=len;
+}
+
+
 // bPartialIsOK=true - accept partial packets not containing the whole TLS message
 bool TLSFindExtInHandshake(const uint8_t *data, size_t len, uint16_t type, const uint8_t **ext, size_t *len_ext, bool bPartialIsOK)
 {
@@ -143,14 +212,11 @@ bool TLSFindExtInHandshake(const uint8_t *data, size_t len, uint16_t type, const
 
 	size_t l, ll;
 
+	if (!bPartialIsOK && !IsTLSHandshakeFull(data,len)) return false;
+
 	l = 1 + 3 + 2 + 32;
 	// SessionIDLength
 	if (len < (l + 1)) return false;
-	if (!bPartialIsOK)
-	{
-	    ll = data[1] << 16 | data[2] << 8 | data[3]; // HandshakeProtocol length
-	    if (len < (ll + 4)) return false;
-	}
 	l += data[l] + 1;
 	// CipherSuitesLength
 	if (len < (l + 2)) return false;
@@ -200,7 +266,10 @@ bool TLSFindExt(const uint8_t *data, size_t len, uint16_t type, const uint8_t **
 	// u8	ContentType: Handshake
 	// u16	Version: TLS1.0
 	// u16	Length
+	size_t reclen;
 	if (!IsTLSClientHello(data, len, bPartialIsOK)) return false;
+	reclen=TLSRecordLen(data);
+	if (reclen<len) len=reclen; // correct len if it has more data than the first tls record has
 	return TLSFindExtInHandshake(data + 5, len - 5, type, ext, len_ext, bPartialIsOK);
 }
 static bool TLSExtractHostFromExt(const uint8_t *ext, size_t elen, char *host, size_t len_host)
@@ -235,6 +304,23 @@ bool TLSHelloExtractHostFromHandshake(const uint8_t *data, size_t len, char *hos
 
 	if (!TLSFindExtInHandshake(data, len, 0, &ext, &elen, bPartialIsOK)) return false;
 	return TLSExtractHostFromExt(ext, elen, host, len_host);
+}
+size_t TLSPos(enum tlspos tpos_type, size_t tpos_pos, const uint8_t *tls, size_t sz, uint8_t type)
+{
+	size_t elen;
+	const uint8_t *ext;
+	switch(tpos_type)
+	{
+		case tlspos_sni:
+		case tlspos_sniext:
+			if (TLSFindExt(tls,sz,0,&ext,&elen,false))
+				return (tpos_type==tlspos_sni) ? ext-tls+6 : ext-tls+1;
+			// fall through
+		case tlspos_pos:
+			return tpos_pos<sz ? tpos_pos : 0;
+		default:
+			return 0;
+	}
 }
 
 
@@ -273,7 +359,7 @@ bool IsQUICCryptoHello(const uint8_t *data, size_t len, size_t *hello_offset, si
 	// offset must be 0 if it's a full segment, not just a chunk
 	if (coff || (offset+tvb_get_size(data[offset])) >= len) return false;
 	offset += tvb_get_varint(data + offset, &clen);
-	if (data[offset] != 0x01 || (offset + clen) > len) return false;
+	if ((offset + clen) > len || !IsTLSHandshakeClientHello(data+offset,clen)) return false;
 	if (hello_offset) *hello_offset = offset;
 	if (hello_len) *hello_len = (size_t)clen;
 	return true;
@@ -328,16 +414,9 @@ static bool is_quic_draft_max(uint32_t draft_version, uint8_t max_version)
 {
 	return draft_version && draft_version <= max_version;
 }
-static bool is_quic_version_with_v1_labels(uint32_t version)
-{
-	if (((version & 0xFFFFFF00) == 0x51303500)  /* Q05X */ ||
-		((version & 0xFFFFFF00) == 0x54303500)) /* T05X */
-		return true;
-	return is_quic_draft_max(QUICDraftVersion(version), 34);
-}
 static bool is_quic_v2(uint32_t version)
 {
-    return version == 0x709A50C4;
+    return version == 0x6b3343cf;
 }
 
 static bool quic_hkdf_expand_label(const uint8_t *secret, uint8_t secret_len, const char *label, uint8_t *out, size_t out_len)
@@ -399,9 +478,9 @@ static bool quic_derive_initial_secret(const quic_cid_t *cid, uint8_t *client_in
 		0x7a, 0x4e, 0xde, 0xf4, 0xe7, 0xcc, 0xee, 0x5f, 0xa4, 0x50,
 		0x6c, 0x19, 0x12, 0x4f, 0xc8, 0xcc, 0xda, 0x6e, 0x03, 0x3d
 	};
-	static const uint8_t handshake_salt_v2_draft_00[20] = {
-		0xa7, 0x07, 0xc2, 0x03, 0xa5, 0x9b, 0x47, 0x18, 0x4a, 0x1d,
-		0x62, 0xca, 0x57, 0x04, 0x06, 0xea, 0x7a, 0xe3, 0xe5, 0xd3
+	static const uint8_t handshake_salt_v2[20] = {
+		0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
+		0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9
 	};
 
 	int err;
@@ -431,7 +510,7 @@ static bool quic_derive_initial_secret(const quic_cid_t *cid, uint8_t *client_in
 		salt = handshake_salt_v1;
 	}
 	else {
-		salt = handshake_salt_v2_draft_00;
+		salt = handshake_salt_v2;
 	}
 
 	err = hkdfExtract(SHA256, salt, 20, cid->cid, cid->len, secret);
@@ -470,7 +549,7 @@ bool QUICDecryptInitial(const uint8_t *data, size_t data_len, uint8_t *clean, si
 	if (!quic_derive_initial_secret(&dcid, client_initial_secret, ver)) return false;
 
 	uint8_t aeskey[16], aesiv[12], aeshp[16];
-	bool v1_label = is_quic_version_with_v1_labels(ver);
+	bool v1_label = !is_quic_v2(ver);
 	if (!quic_hkdf_expand_label(client_initial_secret, SHA256HashSize, v1_label ? "tls13 quic key" : "tls13 quicv2 key", aeskey, sizeof(aeskey)) ||
 		!quic_hkdf_expand_label(client_initial_secret, SHA256HashSize, v1_label ? "tls13 quic iv" : "tls13 quicv2 iv", aesiv, sizeof(aesiv)) ||
 		!quic_hkdf_expand_label(client_initial_secret, SHA256HashSize, v1_label ? "tls13 quic hp" : "tls13 quicv2 hp", aeshp, sizeof(aeshp)))
@@ -521,7 +600,7 @@ bool QUICDecryptInitial(const uint8_t *data, size_t data_len, uint8_t *clean, si
 	header[0] = packet0;
 	for(uint8_t i = 0; i < pkn_len; i++) header[header_len - 1 - i] = (uint8_t)(pkn >> (8 * i));
 
-	if (aes_gcm_crypt(DECRYPT, clean, decrypt_begin, cryptlen, aeskey, sizeof(aeskey), aesiv, sizeof(aesiv), header, header_len, atag, sizeof(atag)))
+	if (aes_gcm_crypt(AES_DECRYPT, clean, decrypt_begin, cryptlen, aeskey, sizeof(aeskey), aesiv, sizeof(aesiv), header, header_len, atag, sizeof(atag)))
 		return false;
 
 	// check if message was decrypted correctly : good keys , no data corruption

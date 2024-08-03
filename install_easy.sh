@@ -8,6 +8,7 @@ IPSET_DIR="$EXEDIR/ipset"
 ZAPRET_CONFIG="$EXEDIR/config"
 ZAPRET_BASE="$EXEDIR"
 
+[ -f "$ZAPRET_CONFIG" ] || cp "${ZAPRET_CONFIG}.default" "$ZAPRET_CONFIG"
 . "$ZAPRET_CONFIG"
 . "$ZAPRET_BASE/common/base.sh"
 . "$ZAPRET_BASE/common/elevate.sh"
@@ -23,34 +24,6 @@ ZAPRET_TARGET=/opt/zapret
 GET_LIST="$IPSET_DIR/get_config.sh"
 
 [ -n "$TPPORT" ] || TPPORT=988
-
-MD5=md5sum
-exists $MD5 || MD5=md5
-
-sedi()
-{
-	# MacOS doesnt support -i without parameter. busybox doesnt support -i with parameter.
-	# its not possible to put "sed -i ''" to a variable and then use it
-	if [ "$SYSTEM" = "macos" ]; then
-		sed -i '' "$@"
-	else
-		sed -i "$@"
-	fi
-}
-
-random()
-{
-	# $1 - min, $2 - max
-	local r rs
-	if [ -c /dev/urandom ]; then
-		read rs </dev/urandom
-	else
-		rs="$RANDOM$RANDOM$(date)"
-	fi
-	# shells use signed int64
-	r=1$(echo $rs | $MD5 | sed 's/[^0-9]//g' | head -c 17)
-	echo $(( ($r % ($2-$1+1)) + $1 ))
-}
 
 check_readonly_system()
 {
@@ -77,7 +50,7 @@ check_bins()
 	echo \* checking executables
 
 	fix_perms_bin_test "$EXEDIR"
-	local arch=$(get_bin_arch)
+	local arch="$(get_bin_arch)"
 	local make_target
 	[ "$FORCE_BUILD" = "1" ] && {
 		echo forced build mode
@@ -121,36 +94,6 @@ install_binaries()
 		echo compatible binaries not found
 		exitp 8
 	}
-}
-
-write_config_var()
-{
-	# $1 - mode var
-	local M
-	eval M="\$$1"
-
-	if grep -q "^$1=\|^#$1=" "$ZAPRET_CONFIG"; then
-		# replace / => \/
-		#M=${M//\//\\\/}
-		M=$(echo $M | sed 's/\//\\\//g')
-		if [ -n "$M" ]; then
-			if contains "$M" " "; then
-				sedi -Ee "s/^#?$1=.*$/$1=\"$M\"/" "$ZAPRET_CONFIG"
-			else
-				sedi -Ee "s/^#?$1=.*$/$1=$M/" "$ZAPRET_CONFIG"
-			fi
-		else
-			# write with comment at the beginning
-			sedi -Ee "s/^#?$1=.*$/#$1=/" "$ZAPRET_CONFIG"
-		fi
-	else
-		# var does not exist in config. add it
-		if [ -n "$M" ]; then
-			echo "$1=$M" >>"$ZAPRET_CONFIG"
-		else
-			echo "#$1=$M" >>"$ZAPRET_CONFIG"
-		fi
-	fi
 }
 
 select_mode_mode()
@@ -218,6 +161,16 @@ select_mode_https()
 }
 select_mode_quic()
 {
+	[ "$SUBSYS" = "keenetic" ] && {
+		echo
+		echo "WARNING ! Keenetic is not officially supported by zapret."
+		echo "WARNING ! This firmware requires additional manual iptables setup to support udp desync properly."
+		echo "WARNING ! Keenetic uses proprietary ndmmark to limit MASQUERADE."
+		echo "WARNING ! Desynced packets may go outside without MASQUERADE with LAN source ip."
+		echo "WARNING ! To fix this you need to add additional MASQUERADE rule to iptables nat table."
+		echo "WARNING ! Installer WILL NOT fix it for you automatically."
+		echo "WARNING ! If you cannot understand what it is all about - do not enable QUIC."
+	}
 	[ "$MODE" != "filter" ] && [ "$MODE" != "tpws-socks" ] && [ "$MODE" != "tpws" ] && {
 		echo
 		ask_yes_no_var MODE_QUIC "enable quic support"
@@ -263,31 +216,6 @@ select_getlist()
 	fi
 	GETLIST=""
 	write_config_var GETLIST
-}
-select_ipv6()
-{
-	local T=N
-
-	[ "$DISABLE_IPV6" != '1' ] && T=Y
-	local old6=$DISABLE_IPV6
-	echo
-	if ask_yes_no $T "enable ipv6 support"; then
-		DISABLE_IPV6=0
-	else
-		DISABLE_IPV6=1
-	fi
-	[ "$old6" != "$DISABLE_IPV6" ] && write_config_var DISABLE_IPV6
-}
-select_fwtype()
-{
-	echo
-	[ $(get_ram_mb) -le 400 ] && {
-		echo WARNING ! you are running a low RAM system
-		echo WARNING ! nft requires lots of RAM to load huge ip sets, much more than ipsets require
-		echo WARNING ! if you need large lists it may be necessary to fall back to iptables+ipset firewall
-	}
-	echo select firewall type :
-	ask_list FWTYPE "iptables nftables" "$FWTYPE" && write_config_var FWTYPE
 }
 
 ask_config()
@@ -448,15 +376,29 @@ select_mode_iface()
 	esac
 }
 
+default_files()
+{
+	[ -f "$1/ipset/$file/zapret-hosts-user-exclude.txt" ] || cp "$1/ipset/$file/zapret-hosts-user-exclude.txt.default" "$1/ipset/$file/zapret-hosts-user-exclude.txt"
+	[ -f "$1/ipset/$file/zapret-hosts-user.txt" ] || echo nonexistent.domain >> "$1/ipset/$file/zapret-hosts-user.txt"
+	[ -f "$1/ipset/$file/zapret-hosts-user-ipban.txt" ] || touch "$1/ipset/$file/zapret-hosts-user-ipban.txt"
+	for dir in openwrt sysv macos; do
+		[ -d "$1/init.d/$dir" ] && {
+			[ -f "$1/init.d/$dir/custom" ] || cp "$1/init.d/$dir/custom.default" "$1/init.d/$dir/custom"
+		}
+	done
+}
 copy_all()
 {
+	local dir
+
 	cp -R "$1" "$2"
 	[ -d "$2/tmp" ] || mkdir "$2/tmp"
 }
 copy_openwrt()
 {
-	local ARCH=$(get_bin_arch)
+	local ARCH="$(get_bin_arch)"
 	local BINDIR="$1/binaries/$ARCH"
+	local file
 	
 	[ -d "$2" ] || mkdir -p "$2"
 
@@ -464,7 +406,7 @@ copy_openwrt()
 	cp -R "$1/files/fake" "$2/files"
 	cp -R "$1/common" "$1/ipset" "$2"
 	cp -R "$1/init.d/openwrt" "$2/init.d"
-	cp "$1/config" "$1/install_easy.sh" "$1/uninstall_easy.sh" "$1/install_bin.sh" "$1/blockcheck.sh" "$2"
+	cp "$1/config" "$1/config.default" "$1/install_easy.sh" "$1/uninstall_easy.sh" "$1/install_bin.sh" "$1/install_prereq.sh" "$1/blockcheck.sh" "$2"
 	cp "$BINDIR/tpws" "$BINDIR/nfqws" "$BINDIR/ip2net" "$BINDIR/mdig" "$2/binaries/$ARCH"
 }
 
@@ -484,6 +426,7 @@ fix_perms()
 install_bin.sh \
 blockcheck.sh \
 install_easy.sh \
+install_prereq.sh \
 files/huawei/E8372/zapret-ip \
 files/huawei/E8372/unzapret-ip \
 files/huawei/E8372/run-zapret-hostlist \
@@ -549,7 +492,9 @@ check_location()
 	echo \* checking location
 
 	# use inodes in case something is linked
-	[ -d "$ZAPRET_TARGET" ] && [ $(get_dir_inode "$EXEDIR") = $(get_dir_inode "$ZAPRET_TARGET") ] || {
+	if [ -d "$ZAPRET_TARGET" ] && [ $(get_dir_inode "$EXEDIR") = $(get_dir_inode "$ZAPRET_TARGET") ]; then
+		default_files "$ZAPRET_TARGET"
+	else
 		echo
 		echo easy install is supported only from default location : $ZAPRET_TARGET
 		echo currently its run from $EXEDIR
@@ -569,7 +514,7 @@ check_location()
 					exitp 3
 				fi
 			fi
-			local B=$(dirname "$ZAPRET_TARGET")
+			local B="$(dirname "$ZAPRET_TARGET")"
 			[ -d "$B" ] || mkdir -p "$B"
 			$1 "$EXEDIR" "$ZAPRET_TARGET"
 			fix_perms "$ZAPRET_TARGET"
@@ -580,90 +525,8 @@ check_location()
 			echo copying aborted. exiting
 			exitp 3
 		fi
-	}
-	echo running from $EXEDIR
-}
-
-
-check_prerequisites_linux()
-{
-	echo \* checking prerequisites
-
-	local s cmd PKGS UTILS req="curl curl"
-	case "$FWTYPE" in
-		iptables)
-			req="$req iptables iptables ip6tables iptables ipset ipset"
-			;;
-		nftables)
-			req="$req nft nftables"
-			;;
-	esac
-
-	PKGS=$(for s in $req; do echo $s; done |
-		while read cmd; do
-			read pkg
-			exists $cmd || echo $pkg
-		done | sort -u | xargs)
-	UTILS=$(for s in $req; do echo $s; done |
-		while read cmd; do
-			read pkg
-			echo $cmd
-		done | sort -u | xargs)
-
-	if [ -z "$PKGS" ] ; then
-		echo required utilities exist : $UTILS
-	else
-		echo \* installing prerequisites
-
-		echo packages required : $PKGS
-
-		APTGET=$(whichq apt-get)
-		YUM=$(whichq yum)
-		PACMAN=$(whichq pacman)
-		ZYPPER=$(whichq zypper)
-		EOPKG=$(whichq eopkg)
-		APK=$(whichq apk)
-		if [ -x "$APTGET" ] ; then
-			"$APTGET" update
-			"$APTGET" install -y --no-install-recommends $PKGS dnsutils || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		elif [ -x "$YUM" ] ; then
-			"$YUM" -y install $PKGS || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		elif [ -x "$PACMAN" ] ; then
-			"$PACMAN" -Syy
-			"$PACMAN" --noconfirm -S $PKGS || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		elif [ -x "$ZYPPER" ] ; then
-			"$ZYPPER" --non-interactive install $PKGS || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		elif [ -x "$EOPKG" ] ; then
-			"$EOPKG" -y install $PKGS || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		elif [ -x "$APK" ] ; then
-			"$APK" update
-			# for alpine
-			[ "$FWTYPE" = iptables ] && [ -n "$($APK list ip6tables)" ] && PKGS="$PKGS ip6tables"
-			"$APK" add $PKGS || {
-				echo could not install prerequisites
-				exitp 6
-			}
-		else
-			echo supported package manager not found
-			echo you must manually install : $UTILS
-			exitp 5
-		fi
 	fi
+	echo running from $EXEDIR
 }
 
 
@@ -828,76 +691,6 @@ install_linux()
 	echo "if your system uses sysv init : ln -fs $INIT_SCRIPT_SRC /etc/init.d/zapret ; chkconfig zapret on"
 }
 
-
-check_prerequisites_openwrt()
-{
-	echo \* checking prerequisites
-
-	local PKGS="curl" UPD=0
-
-	case "$FWTYPE" in
-		iptables)
-			PKGS="$PKGS ipset iptables-mod-extra iptables-mod-nfqueue iptables-mod-filter iptables-mod-ipopt iptables-mod-conntrack-extra"
-			[ "$DISABLE_IPV6" != "1" ] && PKGS="$PKGS ip6tables-mod-nat ip6tables-extra"
-			;;
-		nftables)
-			PKGS="$PKGS nftables kmod-nft-nat kmod-nft-offload kmod-nft-queue"
-			;;
-	esac
-
-	if check_packages_openwrt $PKGS ; then
-		echo everything is present
-	else
-		echo \* installing prerequisites
-
-		opkg update
-		UPD=1
-		opkg install $PKGS || {
-			echo could not install prerequisites
-			exitp 6
-		}
-	fi
-	
-	is_linked_to_busybox gzip && {
-		echo
-		echo your system uses default busybox gzip. its several times slower than GNU gzip.
-		echo ip/host list scripts will run much faster with GNU gzip
-		echo installer can install GNU gzip but it requires about 100 Kb space
-		if ask_yes_no N "do you want to install GNU gzip"; then
-			[ "$UPD" = "0" ] && {
-				opkg update
-				UPD=1
-			}
-			opkg install --force-overwrite gzip
-		fi
-	}
-	is_linked_to_busybox sort && {
-		echo
-		echo your system uses default busybox sort. its much slower and consumes much more RAM than GNU sort
-		echo ip/host list scripts will run much faster with GNU sort
-		echo installer can install GNU sort but it requires about 100 Kb space
-		if ask_yes_no N "do you want to install GNU sort"; then
-			[ "$UPD" = "0" ] && {
-				opkg update
-				UPD=1
-			}
-			opkg install --force-overwrite coreutils-sort
-		fi
-	}
-	[ "$FSLEEP" = 0 ] && is_linked_to_busybox sleep && {
-		echo
-		echo no methods of sub-second sleep were found.
-		echo if you want to speed up blockcheck install coreutils-sleep. it requires about 40 Kb space
-		if ask_yes_no N "do you want to install COREUTILS sleep"; then
-			[ "$UPD" = "0" ] && {
-				opkg update
-				UPD=1
-			}
-			opkg install --force-overwrite coreutils-sleep
-			fsleep_setup
-		fi
-	}
-}
 
 deoffload_openwrt_firewall()
 {
@@ -1143,8 +936,8 @@ install_keenetic()
 [ "$1" = "make" ] && FORCE_BUILD=1
 
 umask 0022
-fsleep_setup
 fix_sbin_path
+fsleep_setup
 check_system
 
 [ "$SYSTEM" = "macos" ] && . "$EXEDIR/init.d/macos/functions"

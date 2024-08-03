@@ -1,9 +1,12 @@
 #pragma once
 
 #include <stdbool.h>
+#include <inttypes.h>
 #include <sys/queue.h>
 #include <time.h>
 #include "tamper.h"
+#include "params.h"
+#include "resolver.h"
 
 #define BACKLOG 10
 #define MAX_EPOLL_EVENTS 64
@@ -30,7 +33,7 @@ struct send_buffer
 {
 	uint8_t *data;
 	size_t len,pos;
-	int ttl;
+	int ttl, flags;
 };
 typedef struct send_buffer send_buffer_t;
 
@@ -57,17 +60,19 @@ struct tproxy_conn
 	enum {
 		S_WAIT_HANDSHAKE=0,
 		S_WAIT_REQUEST,
+		S_WAIT_RESOLVE,
 		S_WAIT_CONNECTION,
 		S_TCP
 	} socks_state;
 	uint8_t socks_ver;
+	struct resolve_item *socks_ri;
 
 	// these value are used in flow control. we do not use ET (edge triggered) polling
 	// if we dont disable notifications they will come endlessly until condition becomes false and will eat all cpu time
 	bool bFlowIn,bFlowOut, bFlowInPrev,bFlowOutPrev, bPrevRdhup;
 
 	// total read,write
-	size_t trd,twr;
+	uint64_t trd,twr, tnrd;
 	// number of epoll_wait events
 	unsigned int event_count;
 
@@ -86,7 +91,7 @@ struct tproxy_conn
 	struct send_buffer wr_buf[4];
 
 	t_ctrack track;
-	
+
 	//Create the struct which contains ptrs to next/prev element
 	TAILQ_ENTRY(tproxy_conn) conn_ptrs;
 };

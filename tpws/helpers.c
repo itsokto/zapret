@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <time.h>
+#include <sys/stat.h>
 
 char *strncasestr(const char *s,const char *find, size_t slen)
 {
@@ -221,4 +222,42 @@ int fprint_localtime(FILE *F)
 	time(&now);
 	localtime_r(&now,&t);
 	return fprintf(F, "%02d.%02d.%04d %02d:%02d:%02d", t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, t.tm_hour, t.tm_min, t.tm_sec);
+}
+
+time_t file_mod_time(const char *filename)
+{
+	struct stat st;
+	return stat(filename,&st)==-1 ? 0 : st.st_mtime;
+}
+
+bool pf_in_range(uint16_t port, const port_filter *pf)
+{
+	return port && ((!pf->from && !pf->to || port>=pf->from && port<=pf->to) ^ pf->neg);
+}
+bool pf_parse(const char *s, port_filter *pf)
+{
+	unsigned int v1,v2;
+
+	if (!s) return false;
+	if (*s=='~') 
+	{
+		pf->neg=true;
+		s++;
+	}
+	else
+		pf->neg=false;
+	if (sscanf(s,"%u-%u",&v1,&v2)==2)
+	{
+		if (!v1 || v1>65535 || v2>65535 || v1>v2) return false;
+		pf->from=(uint16_t)v1;
+		pf->to=(uint16_t)v2;
+	}
+	else if (sscanf(s,"%u",&v1)==1)
+	{
+		if (!v1 || v1>65535) return false;
+		pf->to=pf->from=(uint16_t)v1;
+	}
+	else
+		return false;
+	return true;
 }

@@ -255,3 +255,47 @@ autohostlist mode
 v53
 
 nfqws: tcp session reassemble for TLS ClientHello
+
+v54
+
+tpws: out of band send when splitting (--oob)
+nfqws: autottl
+nfqws: datanoack fooling
+nftables: use POSTNAT path for tcp redirections to allow NAT-breaking strategies. use additional mark bit DESYNC_MARK_POSTNAT.
+
+v55
+
+tpws: incompatible oob parameter change. it doesn't take oob byte anymore. instead it takes optional protocol filter - http or tls.
+  the same is done with disorder. oob byte can be specified in parameter --oob-data.
+blockcheck: quick mode, strategy order optimizations, QUIC protocol support
+nfqws: syndata desync mode
+
+v56
+
+tpws: mss fooling
+tpws: multi thread resolver. eliminates blocks related to hostname resolve.
+
+v57
+
+tpws: --nosplice option
+nfqws: postnat fixes
+nfqws: --dpi-desync-start option
+nfqws: packet delay for kyber TLS and QUIC
+nfqws: --dpi-desync-retrans obsolete
+nfqws: --qnum is mandatory, no more default queue 0
+
+v58
+
+winws
+
+v59
+
+tpws: --split-tls
+tpws: --tlsrec=sniext
+nfqws: --dpi-desync-split-http-req, --dpi-desync-split-tls. multi segment TLS support for split.
+blockcheck: mdig dns cache
+
+v60
+
+blockcheck: port block test, partial ip block test
+nfqws: seqovl split/disorder modes
